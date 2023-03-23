@@ -1,121 +1,110 @@
-from flask import Flask, request
-from random import choice
+from flask import Flask, request, jsonify, abort, g
+from pathlib import Path
+import sqlite3
+from werkzeug.exceptions import HTTPException
+
+BASE_DIR = Path(__name__).parent
+DATABASE = BASE_DIR / "test.db"
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 
-about_me = {
-    "name": "Евгений",
-    "surname": "Юрченко",
-    "email": "eyurchenko@specialist.ru"
-}
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+    return db
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
 
 
-quotes = [
-{
-"id": 1,
-"author": "Rick Cook",
-"text": "Программирование сегодня — это гонка разработчиков программ, стремящихся писать программы с большей и лучшей идиотоустойчивостью, и вселенной, которая пытается создать больше отборных идиотов. Пока вселенная побеждает.",
-"rating" : 4
-},
-{
-"id": 2,
-"author": "Waldi Ravens",
-"text": "Программирование на С похоже на быстрые танцы на только что отполированном полу людей с острыми бритвами в руках.",
-"rating" : 5
-},
-{
-"id": 3,
-"author": "Mosher’s Law of Software Engineering",
-"text": "Не волнуйтесь, если что-то не работает. Если бы всё работало, вас бы уволили.",
-"rating" : 1
-},
-{
-"id": 4,
-"author": "Yoggi Berra",
-"text": "В теории, теория и практика неразделимы. На практике это не так.",
-"rating" : 2
-}
-]
-
-@app.route("/")
-def hello_world():
-    return "Hello, World!"
-
-
-@app.route("/about")
-def about():
-    return about_me
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    return jsonify({"message": e.description}), e.code
 
 #Сериализация list -> str
 @app.route("/quotes")
 def get_quotes():
-    return quotes
+    conn = get_db()
+    cursor = conn.cursor()
+    select_quotes = "SELECT * FROM quotes"
+    cursor.execute(select_quotes)
+    quotes_db = cursor.fetchall()
+    keys = ["id", "author", "text"]
+    #quotes = [dict(zip(keys, quote_db)) for quote_db in quotes_db]  # аналог строк с 52 по 55
+    quotes = []
+    for quote_db in quotes_db:
+        quote = dict(zip(keys, quote_db))
+        quotes.append(quote)
+    return jsonify(quotes)
 
 
 @app.route('/quotes/<int:quote_id>')
 def show_quote(quote_id):
-    for quote in quotes:
-        if quote["id"] == quote_id:
-            return quote["text"]   
-    return f"Quote with id={quote_id} not found", 404
+    conn = get_db()
+    cursor = conn.cursor()
+    select_quotes = f"SELECT * FROM quotes WHERE id = {quote_id}"
+    cursor.execute(select_quotes)
+    quotes_db = cursor.fetchone() #Возвращает кортеж или None если нет такой строки
+    keys = ["id", "author", "text"]
+    if quotes_db is not None:
+        quotes = dict(zip(keys, quotes_db))
+        return jsonify(quotes), 200
+    else:
+        return abort(404, f"Quote with id={quote_id} not found")
 
 
 
-@app.route('/quotes/count')
-def quote_count():
-    return {"Count": str(len(quotes))}
 
-
-
-@app.route('/quotes/random')
-def quote_random():
-    return choice(quotes)
-
-#####Практика: Часть 2
-#####Выполнил вместе с дополнительными заданиями
 
 @app.route("/quotes", methods=['POST'])
 def create_quote():
-   new_quote = request.json
-   last_quote = quotes[-1]
-   new_id = last_quote["id"] + 1
-   new_quote["id"] = new_id
-   if "rating" in new_quote:
+    new_quote = request.json
+    conn = get_db()
+    if "rating" in new_quote:
        if new_quote["rating"] > 5:
            new_quote["rating"] = 1
-   else:
+    else:
        new_quote["rating"] = 1
-   quotes.append(new_quote)
-   return new_quote, 201
+    cursor = conn.cursor()
+    add_quotes = "INSERT INTO quotes (author,text) VALUES (?, ?)"
+    cursor.execute(add_quotes, (new_quote['author'], new_quote['text']))
+    conn.commit()
+    id = cursor.lastrowid
+    return f"Insert new quote, id = {id}", 201
 
+##ДЗ по PUT и DELETE
 
 @app.route("/quotes/<id>", methods=['PUT'])
 def edit_quote(id):
    new_data = request.json
-   for quote in quotes:      
-    if quote["id"] == int(id):
-            try:                
-                quote.update(author=new_data["author"])
-            except:
-                pass
-            try:                               
-                quote.update(text=new_data["text"])
-            except:
-                pass
-            return quote, 200
-    else:
-        return f"Quote with id={id} not found", 404
+   conn = get_db()
+   cursor = conn.cursor()
+   for value in new_data:            
+       update_quotes = f"UPDATE quotes SET {value} = ? WHERE ID = ?"
+       cursor.execute(update_quotes, (new_data[value], id))
+       conn.commit()
+   row_count = cursor.rowcount    
+   if  row_count > 0:
+       return f"Update quote, id = {id}", 200
+   else:
+       return abort(404, f"Quote with id={id} not found")
+
 
    
 @app.route("/quotes/<id>", methods=['DELETE'])
 def delete(id):
-   for quote in quotes:
-       if quote["id"] == int(id):            
-            del quotes[quotes.index(quote)] 
-            return f"Quote with id {id} is deleted.", 200
-   else:
-       return f"Quote with id={id} not found", 404
+    conn = get_db()
+    cursor = conn.cursor()
+    delete_quotes = f"DELETE FROM quotes WHERE id = ?"
+    cursor.execute(delete_quotes, [id])
+    row_count = cursor.rowcount
+    conn.commit()      
+    return f"{row_count} rows deleted. Quote with id {id} is deleted.", 200
 
 
 @app.route("/quotes/filter", methods=['GET'])
@@ -124,6 +113,9 @@ def filter():
     author = args.get('author')
     rating = args.get('rating')
     output = []
+    #for quote in quotes:
+        #if all(True if args[key] == str(quote[key] else Flase for key in args)):
+        #output.append(quote)
     if author != None and rating == None:
         for quote in quotes:
             if quote["author"] == author:
@@ -137,7 +129,7 @@ def filter():
         for quote in quotes:
             if quote["rating"] == int(rating) and quote["author"] == author:
                 output.append(quote)
-    return output
+    return jsonify(output), 200
 
 
 
