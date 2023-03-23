@@ -1,136 +1,121 @@
-from flask import Flask, request, jsonify, abort, g
+from flask import Flask, request, jsonify, abort
+from flask_sqlalchemy import SQLAlchemy
 from pathlib import Path
-import sqlite3
 from werkzeug.exceptions import HTTPException
 
-BASE_DIR = Path(__name__).parent
-DATABASE = BASE_DIR / "test.db"
+BASE_DIR = Path(__file__).parent
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-    return db
+app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{BASE_DIR / 'main.db'}"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+db = SQLAlchemy(app)
 
+
+class QuoteModel(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    author = db.Column(db.String(32), unique=False)
+    text = db.Column(db.String(255), unique=False)
+    rating = db.Column(db.Integer, unique=False)
+
+    def __init__(self, author, text, rating = 1):
+        self.author = author
+        self.text = text
+        self.rating = rating
+
+    def __repr__(self):
+        return f"Quote({self.author}, {self.text}, {self.rating})"
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "author": self.author,
+            "text": self.text,
+            "rating": self.rating
+        }
 
 @app.errorhandler(HTTPException)
 def handle_exception(e):
     return jsonify({"message": e.description}), e.code
 
-#Сериализация list -> str
+# Сериализация list[quotes] -> list[dict] -> str
+
 @app.route("/quotes")
 def get_quotes():
-    conn = get_db()
-    cursor = conn.cursor()
-    select_quotes = "SELECT * FROM quotes"
-    cursor.execute(select_quotes)
-    quotes_db = cursor.fetchall()
-    keys = ["id", "author", "text"]
-    #quotes = [dict(zip(keys, quote_db)) for quote_db in quotes_db]  # аналог строк с 52 по 55
-    quotes = []
-    for quote_db in quotes_db:
-        quote = dict(zip(keys, quote_db))
-        quotes.append(quote)
-    return jsonify(quotes)
+    quotes = QuoteModel.query.all()
+    quotes_as_dict = []
+    for quote in quotes:
+        quotes_as_dict.append(quote.to_dict())
+    return jsonify(quotes_as_dict), 200
 
+#Задание 2.2
 
 @app.route('/quotes/<int:quote_id>')
 def show_quote(quote_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    select_quotes = f"SELECT * FROM quotes WHERE id = {quote_id}"
-    cursor.execute(select_quotes)
-    quotes_db = cursor.fetchone() #Возвращает кортеж или None если нет такой строки
-    keys = ["id", "author", "text"]
-    if quotes_db is not None:
-        quotes = dict(zip(keys, quotes_db))
-        return jsonify(quotes), 200
+    quote = QuoteModel.query.get(quote_id)
+    if quote is not None:
+        return jsonify(quote.to_dict()), 200
     else:
-        return abort(404, f"Quote with id={quote_id} not found")
-
-
-
+        return abort(404, f"Quote with id={quote} not found")
 
 
 @app.route("/quotes", methods=['POST'])
 def create_quote():
     new_quote = request.json
-    conn = get_db()
-    if "rating" in new_quote:
-       if new_quote["rating"] > 5:
-           new_quote["rating"] = 1
-    else:
-       new_quote["rating"] = 1
-    cursor = conn.cursor()
-    add_quotes = "INSERT INTO quotes (author,text) VALUES (?, ?)"
-    cursor.execute(add_quotes, (new_quote['author'], new_quote['text']))
-    conn.commit()
-    id = cursor.lastrowid
-    return f"Insert new quote, id = {id}", 201
+    quote = QuoteModel(new_quote["author"], new_quote["text"])
+    db.session.add(quote)
+    db.session.commit()
+    return jsonify(quote.to_dict()), 201
 
-##ДЗ по PUT и DELETE
+#Задание 2.2  
 
 @app.route("/quotes/<id>", methods=['PUT'])
 def edit_quote(id):
-   new_data = request.json
-   conn = get_db()
-   cursor = conn.cursor()
-   for value in new_data:            
-       update_quotes = f"UPDATE quotes SET {value} = ? WHERE ID = ?"
-       cursor.execute(update_quotes, (new_data[value], id))
-       conn.commit()
-   row_count = cursor.rowcount    
-   if  row_count > 0:
-       return f"Update quote, id = {id}", 200
-   else:
-       return abort(404, f"Quote with id={id} not found")
+    new_data = request.json
+    quote = QuoteModel.query.get(id)
+    if quote is not None:
+        quote.author = new_data['author']
+        quote.text = new_data['text']
+        db.session.commit()
+        return f"Update quote, id = {id}", 200
+    else:
+        return abort(404, f"Quote with id={id} not found")
 
+#Задание 2.2
 
-   
 @app.route("/quotes/<id>", methods=['DELETE'])
 def delete(id):
-    conn = get_db()
-    cursor = conn.cursor()
-    delete_quotes = f"DELETE FROM quotes WHERE id = ?"
-    cursor.execute(delete_quotes, [id])
-    row_count = cursor.rowcount
-    conn.commit()      
-    return f"{row_count} rows deleted. Quote with id {id} is deleted.", 200
+    quote = QuoteModel.query.get(id)
+    if quote is not None:
+        db.session.delete(quote)
+        db.session.commit()
+        return f"Quote with id {id} is deleted.", 200
+    else:
+        return abort(404, f"Quote with id={id} not found")
 
+#Задание 2.2
 
 @app.route("/quotes/filter", methods=['GET'])
 def filter():
     args = request.args
-    author = args.get('author')
-    rating = args.get('rating')
+    author_param = args.get('author')
+    rating_param = args.get('rating')
     output = []
-    #for quote in quotes:
-        #if all(True if args[key] == str(quote[key] else Flase for key in args)):
-        #output.append(quote)
-    if author != None and rating == None:
-        for quote in quotes:
-            if quote["author"] == author:
-                output.append(quote)
-    elif author == None and rating != None:
-        for quote in quotes:
-            print(f"{quote['rating']} = {rating}")
-            if quote["rating"] == int(rating):
-                output.append(quote)
-    elif author != None and rating != None:
-        for quote in quotes:
-            if quote["rating"] == int(rating) and quote["author"] == author:
-                output.append(quote)
-    return jsonify(output), 200
-
+    if author_param is not None and rating_param is None:
+        quote = QuoteModel.query.filter_by(author=author_param).all()
+        for q in quote:
+            output.append(q)
+    elif author_param is None and rating_param is not None:
+        quote = QuoteModel.query.filter_by(rating=rating_param).all()
+        for q in quote:
+            output.append(q)
+    elif author_param is not None and rating_param is not None:
+        quote = QuoteModel.query.filter_by(rating=rating_param, author=author_param).all()
+        for q in quote:
+            output.append(q)
+    return jsonify(str(output)), 200
 
 
 if __name__ == "__main__":
